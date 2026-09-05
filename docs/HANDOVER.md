@@ -92,8 +92,15 @@ open ~/Library/Developer/Xcode/DerivedData/Okosu-*/Build/Products/Debug/Okosu.ap
    d. 初回 ANE コンパイル時間の実測（HANDOVER 既存値: 約30秒）
    ※ このマシンでは `~/Library/Application Support/Okosu/` に PoC モデルへの
    シンボリックリンク済み（ggml bin＋mlmodelc。再 DL・複製なし）
-5. 後回し: バイナリのバンドル同梱、自動ペースト、句読点復元、個人辞書、
-   LLM 整形モード、設定画面
+5. 後回し: 自動ペースト、句読点復元、個人辞書、LLM 整形モード
+6. ✅ **配布**（2026-09-06、v0.1.0 を GitHub Release 公開済み）:
+   - 未署名＋xattr 前提（Developer ID 未加入）。`github.com/d-kimuson/okosu`
+   - `scripts/bundle-deps.sh`: whisper-stream＋dylib closure（8本、coreml 含む）を
+     Frameworks/Resources に同梱し `@executable_path` 相対化＋再署名。モデルは
+     同梱せず初回起動 DL。`scripts/release.sh` で Release ビルド→ZIP→Release 作成
+   - 注意: Release は `ARCHS: arm64` 固定。Debug と違い Release は
+     explicit-module-build のため、同梱 KeyboardShortcuts への phantom import
+    （`import KeyboardShortcuts`）がエラーになる→除去済み
 
 ## ハマりどころ（実績）
 
