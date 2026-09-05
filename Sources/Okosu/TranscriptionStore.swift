@@ -232,12 +232,11 @@ final class TranscriptionStore: ObservableObject {
     }
 
     @MainActor private func append(_ block: TranscriptBlock) {
-        let text = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
         // 受信回復＝健全とみなし、自動再接続カウンタをリセットする。
-        // 重複ブロックもエンジン生存の証拠なので、抑止前にリセットする。
+        // 抑止ブロックもエンジン生存の証拠なので、判定前にリセットする。
         autoRestartCount = 0
-        guard !duplicateGuard.isDuplicate(block) else { return }
+        // VAD 窓重なりの二重確定は抑止／差分化する。nil＝捨てる。
+        guard let text = duplicateGuard.process(block) else { return }
         // 受付中のセッションがなければ作る（想定外の順序への耐性）。
         if sessions.last?.isLive != true {
             sessions.append(RecordingSession())
