@@ -94,10 +94,12 @@ struct ContentView: View {
             if store.isListening {
                 Button("停止") { store.stop() }
                     .buttonStyle(.borderedProminent)
+            } else if store.isBooting {
+                // セットアップ中も止められる (マイク許可待ち・モデル取得中の離脱用)。
+                Button("キャンセル") { store.stop() }
             } else {
                 Button("開始") { store.start() }
                     .buttonStyle(.borderedProminent)
-                    .disabled(store.isBooting)
             }
             if case .listening = store.state, !store.usesANE {
                 Text("Metal")

@@ -101,6 +101,12 @@ open ~/Library/Developer/Xcode/DerivedData/Okosu-*/Build/Products/Debug/Okosu.ap
    - 注意: Release は `ARCHS: arm64` 固定。Debug と違い Release は
      explicit-module-build のため、同梱 KeyboardShortcuts への phantom import
     （`import KeyboardShortcuts`）がエラーになる→除去済み
+7. ✅ **状態管理の堅牢化**（2026-09-06、v0.1.1）:
+   - 起動猶予：spawn 成功直後に「受付中」にせず、2秒生存確認後のみ受付中＋
+     セッション開始。猶予内の死亡は起動失敗→自動再接続へ（誤表示防止）
+   - セットアップ中のキャンセル：起動シーケンス中はフッターにキャンセル表示
+   - 二重起動ガード：`~/Library/Application Support/Okosu/okosu.lock` の
+     flock で検出し「既に起動しています」エラー（マイク競合の防止）
 
 ## ハマりどころ（実績）
 

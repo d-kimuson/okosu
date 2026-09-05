@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import Combine
+import Darwin
 import Foundation
 
 /// 画面とエンジンの仲介。録音セッション列を唯一の真実として保持する。
@@ -55,6 +56,10 @@ final class TranscriptionStore: ObservableObject {
     /// 想定外終了からの自動再接続カウンタ。受信回復でリセット。
     private var autoRestartCount = 0
     private let maxAutoRestart = 3
+    /// プロセス存続中は保持する二重起動防止ロック (flock は死ねば自動解放)。
+    private var instanceLockFD: Int32 = -1
+    /// 子の起動猶予中 (この間の想定外終了は boot 側の猶予チェックに委ねる)。
+    private var expectGrace = false
 
     init() {
         runner.onBlock = { [weak self] block in
@@ -142,6 +147,10 @@ final class TranscriptionStore: ObservableObject {
     // MARK: - private
 
     @MainActor private func boot(generation gen: Int) async {
+        guard acquireInstanceLock() else {
+            state = .error("Okosu は既に起動しています。2重起動はできません。")
+            return
+        }
         state = .starting("マイク確認中…")
         let micGranted = await requestMicrophoneAccess()
         guard gen == generation, !Task.isCancelled else { return }
@@ -169,14 +178,53 @@ final class TranscriptionStore: ObservableObject {
             }
             guard gen == generation, !Task.isCancelled else { return }
             usesANE = paths.hasEncoder
-            state = .starting("エンジン起動中…（初回は ANE 準備に約30秒）")
-            let options = WhisperStreamRunner.Options()
-            try runner.start(binaryPath: binary, modelPath: paths.ggml.path, options: options)
+            try await startEngine(binary: binary, generation: gen)
             beginLiveSession()
             state = .listening
         } catch {
-            state = .error(error.localizedDescription)
+            expectGrace = false
+            guard gen == generation, !Task.isCancelled else { return }
+            // 子の異常終了だけ自動再接続へ回す。マイク拒否・バイナリ欠落等の
+            // 恒常要因はそのままエラー表示 (リトライしても直らないため)。
+            if case WhisperError.terminatedUnexpectedly = error {
+                failEngine(message: error.localizedDescription)
+            } else {
+                state = .error(error.localizedDescription)
+            }
         }
+    }
+
+    /// エンジン起動＋猶予確認。spawn 成功を起動成功とみなさず、猶予内に
+    /// 死んだら起動失敗として投げる（「受付中」の誤表示防止）。
+    @MainActor private func startEngine(binary: String, generation gen: Int) async throws {
+        state = .starting("エンジン起動中…（初回は ANE 準備に約30秒）")
+        let options = WhisperStreamRunner.Options()
+        let modelPath = ModelManager.ggmlURL.path
+        expectGrace = true
+        try runner.start(binaryPath: binary, modelPath: modelPath, options: options)
+        state = .starting("起動確認中…")
+        try? await Task.sleep(for: .seconds(2))
+        expectGrace = false
+        guard gen == generation, !Task.isCancelled else { return }
+        guard runner.isRunning else {
+            throw WhisperError.terminatedUnexpectedly(-1, "whisper-stream が起動直後に終了しました")
+        }
+    }
+
+    /// 二重起動防止ロックを取得する。既取得済みなら true。
+    @MainActor private func acquireInstanceLock() -> Bool {
+        if instanceLockFD >= 0 { return true }
+        let url = ModelManager.supportDirectory.appendingPathComponent("okosu.lock")
+        try? FileManager.default.createDirectory(at: ModelManager.supportDirectory, withIntermediateDirectories: true)
+        let fileDesc = open(url.path, O_CREAT | O_RDWR, 0o644)
+        guard fileDesc >= 0 else { return false }
+        // 同一プロセス内の別 fd でも EWOULDBLOCK になり得るため、先に短絡済み。
+        guard flock(fileDesc, LOCK_EX | LOCK_NB) == 0 else {
+            close(fileDesc)
+            return false
+        }
+        instanceLockFD = fileDesc
+        return true
     }
 
     @MainActor private func append(_ block: TranscriptBlock) {
@@ -215,15 +263,21 @@ final class TranscriptionStore: ObservableObject {
 
     @MainActor private func handleUnexpectedTermination(code: Int32, tail: String) {
         // stop() 経由の意図的停止では呼ばれない（Runner が握りつぶす）。
+        // 猶予中の終了は boot 側のチェックに委ね、二重起動を避ける。
+        guard !expectGrace else { return }
+        failEngine(message: WhisperError.terminatedUnexpectedly(code, tail).localizedDescription)
+    }
+
+    /// 子の異常終了時の共通経路。一時要因に備え3回まで自動再接続する。
+    /// 4回目は諦めてエラーを表示する（恒常故障での無限ループ防止）。
+    @MainActor private func failEngine(message: String) {
         endLiveSession()
-        // 一時的な音声デバイスの hiccup 等に備え、3回まで自動再接続する。
-        // 4回目は諦めてエラーを表示する（恒常故障での無限ループ防止）。
         if autoRestartCount < maxAutoRestart {
             autoRestartCount += 1
             state = .starting("whisper-stream が終了したため再接続中… (\(autoRestartCount)/\(maxAutoRestart))")
             launchBoot(delay: .seconds(3))
         } else {
-            state = .error(WhisperError.terminatedUnexpectedly(code, tail).localizedDescription)
+            state = .error(message)
         }
     }
 
