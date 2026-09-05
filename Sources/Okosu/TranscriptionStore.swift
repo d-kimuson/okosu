@@ -52,6 +52,8 @@ final class TranscriptionStore: ObservableObject {
     private var instanceLockFD: Int32 = -1
     /// 子の `[Start speaking]` 待ち継続。stop() 時に resume して待機を解く。
     private var readyContinuation: CheckedContinuation<Void, Never>?
+    /// VAD 窓重なりによる二重確定の抑止。セッション開始時にリセットする。
+    private var duplicateGuard = DuplicateGuard()
 
     init() {
         runner.onBlock = { [weak self] block in
@@ -233,7 +235,9 @@ final class TranscriptionStore: ObservableObject {
         let text = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         // 受信回復＝健全とみなし、自動再接続カウンタをリセットする。
+        // 重複ブロックもエンジン生存の証拠なので、抑止前にリセットする。
         autoRestartCount = 0
+        guard !duplicateGuard.isDuplicate(block) else { return }
         // 受付中のセッションがなければ作る（想定外の順序への耐性）。
         if sessions.last?.isLive != true {
             sessions.append(RecordingSession())
@@ -250,6 +254,7 @@ final class TranscriptionStore: ObservableObject {
     /// 受付中セッションを開始する（boot 完了時）。
     @MainActor private func beginLiveSession() {
         if sessions.last?.isLive == true { return }
+        duplicateGuard.reset()
         sessions.append(RecordingSession())
     }
 
