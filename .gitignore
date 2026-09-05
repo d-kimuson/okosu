@@ -1,0 +1,32 @@
+# Xcode / Swift
+*.xcodeproj/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
+DerivedData/
+.build/
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# SwiftPM
+.swiftpm/
+
+# Models (large, machine-local; download on first launch, never commit)
+models/
+*.bin
+*.mlmodelc
+*.mlpackage
+
+# direnv
+.direnv/
+
+# dotenv secrets / local overrides (keep .env + .env.secret.example committed)
+.env.secret
+.env.overrides
+
+# macOS
+.DS_Store
+
+# release artifacts
+dist/
