@@ -1,5 +1,4 @@
 import AppKit
-import KeyboardShortcuts
 import ServiceManagement
 import SwiftUI
 

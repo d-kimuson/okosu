@@ -16,6 +16,8 @@ targets:
     # dependencies: なし（Vendor 同梱のため）
     settings:
       base:
+        # whisper-stream 同梱物が arm64 のみのため (README 参照)。
+        ARCHS: arm64
         GENERATE_INFOPLIST_FILE: true
         INFOPLIST_KEY_LSUIElement: true
         INFOPLIST_KEY_NSMicrophoneUsageDescription: "音声入力の文字起こしのためにマイクを使用します"
