@@ -52,6 +52,9 @@ final class TranscriptionStore: ObservableObject {
     private var bootTask: Task<Void, Never>?
     /// stop() で世代を進め、取り残された boot を無効化する。
     private var generation = 0
+    /// 想定外終了からの自動再接続カウンタ。受信回復でリセット。
+    private var autoRestartCount = 0
+    private let maxAutoRestart = 3
 
     init() {
         runner.onBlock = { [weak self] block in
@@ -69,8 +72,18 @@ final class TranscriptionStore: ObservableObject {
     /// 停止→開始の再入可。二重起動は無視する。
     @MainActor func start() {
         guard !isListening, bootTask == nil else { return }
+        autoRestartCount = 0
+        launchBoot()
+    }
+
+    /// boot Task の生成を一元化（手動開始・自動再接続で共有）。
+    @MainActor private func launchBoot(delay: Duration = .zero) {
         let gen = generation
         bootTask = Task {
+            if delay > .zero {
+                try? await Task.sleep(for: delay)
+                guard gen == generation, !Task.isCancelled else { return }
+            }
             await boot(generation: gen)
             bootTask = nil
         }
@@ -85,6 +98,7 @@ final class TranscriptionStore: ObservableObject {
         generation += 1
         bootTask?.cancel()
         bootTask = nil
+        autoRestartCount = 0
         runner.stop()
         endLiveSession()
         if isListening || isBooting {
@@ -168,6 +182,8 @@ final class TranscriptionStore: ObservableObject {
     @MainActor private func append(_ block: TranscriptBlock) {
         let text = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
+        // 受信回復＝健全とみなし、自動再接続カウンタをリセットする。
+        autoRestartCount = 0
         // 受付中のセッションがなければ作る（想定外の順序への耐性）。
         if sessions.last?.isLive != true {
             sessions.append(RecordingSession())
@@ -200,7 +216,15 @@ final class TranscriptionStore: ObservableObject {
     @MainActor private func handleUnexpectedTermination(code: Int32, tail: String) {
         // stop() 経由の意図的停止では呼ばれない（Runner が握りつぶす）。
         endLiveSession()
-        state = .error(WhisperError.terminatedUnexpectedly(code, tail).localizedDescription)
+        // 一時的な音声デバイスの hiccup 等に備え、3回まで自動再接続する。
+        // 4回目は諦めてエラーを表示する（恒常故障での無限ループ防止）。
+        if autoRestartCount < maxAutoRestart {
+            autoRestartCount += 1
+            state = .starting("whisper-stream が終了したため再接続中… (\(autoRestartCount)/\(maxAutoRestart))")
+            launchBoot(delay: .seconds(3))
+        } else {
+            state = .error(WhisperError.terminatedUnexpectedly(code, tail).localizedDescription)
+        }
     }
 
     private func requestMicrophoneAccess() async -> Bool {
