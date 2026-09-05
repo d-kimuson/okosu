@@ -112,6 +112,10 @@ open ~/Library/Developer/Xcode/DerivedData/Okosu-*/Build/Products/Debug/Okosu.ap
      ときのみ録音開始（`togglePopover(source:)` で分岐）
    - `[Start speaking]` を readiness としてパース。モデルロード・ANE 完了前の
      「受付中」誤表示を解消（準備中＝`準備中…`、完了＝受付中＋セッション開始）
+   - 実機確認済み（2026-09-06）: ANE コンパイル済みマシンではウォームアップ待ち
+     なしで即文字起こし可（OS 側キャッシュのため）。初回のみ約30秒かかる想定
+- 運用：開発版で検証が終わるまで Release を出さない（v0.1.2 は未検証のまま公開
+  してしまった反省。Release が要るときは声掛け制）
    - 起動シーケンス中のフッターはキャンセルのみ（開始の二重化なし）
 
 ## ハマりどころ（実績）
