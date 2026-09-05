@@ -25,13 +25,6 @@ final class TranscriptionStore: ObservableObject {
     @Published private(set) var downloadProgress: Double = 0
     @Published private(set) var usesANE = false
 
-    /// 全セッションを結合した全文（すべてコピー対象）。
-    var transcriptText: String {
-        sessions.map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .joined(separator: "\n\n")
-    }
-
     var statusText: String {
         switch state {
         case .idle: "停止中"
@@ -41,7 +34,6 @@ final class TranscriptionStore: ObservableObject {
         }
     }
 
-    var canCopy: Bool { !transcriptText.isEmpty }
     var isListening: Bool { state == .listening }
     /// 起動シーケンス進行中（開始ボタンはこの間押せない）。
     var isBooting: Bool {
@@ -137,10 +129,6 @@ final class TranscriptionStore: ObservableObject {
 
     @MainActor func removeSession(id: UUID) {
         sessions.removeAll { $0.id == id }
-    }
-
-    @MainActor func copyToClipboard() {
-        copy(string: transcriptText)
     }
 
     @MainActor func copySession(id: UUID) {

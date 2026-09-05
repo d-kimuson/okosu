@@ -107,11 +107,8 @@ struct ContentView: View {
                     .foregroundStyle(.tertiary)
             }
             Spacer()
-            Button("クリア") { store.clear() }
-                .disabled(!store.canCopy)
-            Button("すべてコピー") { store.copyToClipboard() }
-                .disabled(!store.canCopy)
-                .keyboardShortcut("c", modifiers: .command)
+            Button("リセット") { store.clear() }
+                .disabled(store.sessions.isEmpty)
         }
         .font(.caption)
         .foregroundStyle(.tertiary)
@@ -126,6 +123,7 @@ private struct SessionCard: View {
     @State private var isEditing = false
     @State private var draft = ""
     @State private var copied = false
+    @State private var confirmingDelete = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -157,6 +155,16 @@ private struct SessionCard: View {
                     }
                 }
                 .disabled(copied)
+                Button {
+                    confirmingDelete = true
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .help("このカードを削除")
+            }
+            .confirmationDialog("このカードを削除しますか？", isPresented: $confirmingDelete) {
+                Button("削除", role: .destructive) { store.removeSession(id: session.id) }
+                Button("キャンセル", role: .cancel) {}
             }
             .font(.caption)
             if isEditing {
