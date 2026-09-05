@@ -58,8 +58,8 @@ final class TranscriptionStore: ObservableObject {
     private let maxAutoRestart = 3
     /// プロセス存続中は保持する二重起動防止ロック (flock は死ねば自動解放)。
     private var instanceLockFD: Int32 = -1
-    /// 子の起動猶予中 (この間の想定外終了は boot 側の猶予チェックに委ねる)。
-    private var expectGrace = false
+    /// 子の `[Start speaking]` 待ち継続。stop() 時に resume して待機を解く。
+    private var readyContinuation: CheckedContinuation<Void, Never>?
 
     init() {
         runner.onBlock = { [weak self] block in
@@ -70,6 +70,9 @@ final class TranscriptionStore: ObservableObject {
         }
         runner.onTerminated = { [weak self] code, tail in
             Task { @MainActor in self?.handleUnexpectedTermination(code: code, tail: tail) }
+        }
+        runner.onReady = { [weak self] in
+            Task { @MainActor in self?.handleEngineReady() }
         }
     }
 
@@ -83,6 +86,10 @@ final class TranscriptionStore: ObservableObject {
 
     /// boot Task の生成を一元化（手動開始・自動再接続で共有）。
     @MainActor private func launchBoot(delay: Duration = .zero) {
+        // 取り残された待機があれば先に解く（古い待機は世代不一致で return する）。
+        bootTask?.cancel()
+        readyContinuation?.resume(returning: ())
+        readyContinuation = nil
         let gen = generation
         bootTask = Task {
             if delay > .zero {
@@ -104,6 +111,9 @@ final class TranscriptionStore: ObservableObject {
         bootTask?.cancel()
         bootTask = nil
         autoRestartCount = 0
+        // readiness 待ちで止まっている boot があれば解く。
+        readyContinuation?.resume(returning: ())
+        readyContinuation = nil
         runner.stop()
         endLiveSession()
         if isListening || isBooting {
@@ -182,33 +192,37 @@ final class TranscriptionStore: ObservableObject {
             beginLiveSession()
             state = .listening
         } catch {
-            expectGrace = false
             guard gen == generation, !Task.isCancelled else { return }
-            // 子の異常終了だけ自動再接続へ回す。マイク拒否・バイナリ欠落等の
-            // 恒常要因はそのままエラー表示 (リトライしても直らないため)。
-            if case WhisperError.terminatedUnexpectedly = error {
-                failEngine(message: error.localizedDescription)
-            } else {
-                state = .error(error.localizedDescription)
-            }
+            // ここに来るのは起動前の恒常要因のみ（マイク拒否・バイナリ欠落等）。
+            // 起動後の死亡は termination ハンドラ経由。リトライしても直らない
+            // ためそのままエラー表示する。
+            state = .error(error.localizedDescription)
         }
     }
 
-    /// エンジン起動＋猶予確認。spawn 成功を起動成功とみなさず、猶予内に
-    /// 死んだら起動失敗として投げる（「受付中」の誤表示防止）。
+    /// エンジン起動＋ readiness 待ち。spawn 成功では受付中にせず、
+    /// 子の `[Start speaking]`（モデルロード完了）をもって起動成功とする。
+    /// 待機前に死んだら termination ハンドラ経由で再接続へ回る。
     @MainActor private func startEngine(binary: String, generation gen: Int) async throws {
         state = .starting("エンジン起動中…（初回は ANE 準備に約30秒）")
         let options = WhisperStreamRunner.Options()
         let modelPath = ModelManager.ggmlURL.path
-        expectGrace = true
         try runner.start(binaryPath: binary, modelPath: modelPath, options: options)
-        state = .starting("起動確認中…")
-        try? await Task.sleep(for: .seconds(2))
-        expectGrace = false
+        state = .starting("準備中…（モデルを読み込んでいます）")
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            readyContinuation = continuation
+        }
+        readyContinuation = nil
         guard gen == generation, !Task.isCancelled else { return }
         guard runner.isRunning else {
-            throw WhisperError.terminatedUnexpectedly(-1, "whisper-stream が起動直後に終了しました")
+            throw WhisperError.terminatedUnexpectedly(-1, "whisper-stream が起動前に終了しました")
         }
+    }
+
+    /// 子の readiness 通知。待機中のみ受領する。
+    @MainActor private func handleEngineReady() {
+        readyContinuation?.resume(returning: ())
+        readyContinuation = nil
     }
 
     /// 二重起動防止ロックを取得する。既取得済みなら true。
@@ -263,8 +277,7 @@ final class TranscriptionStore: ObservableObject {
 
     @MainActor private func handleUnexpectedTermination(code: Int32, tail: String) {
         // stop() 経由の意図的停止では呼ばれない（Runner が握りつぶす）。
-        // 猶予中の終了は boot 側のチェックに委ね、二重起動を避ける。
-        guard !expectGrace else { return }
+        // readiness 待ち中の死亡もここで拾う（唯一の再接続経路）。
         failEngine(message: WhisperError.terminatedUnexpectedly(code, tail).localizedDescription)
     }
 
@@ -272,6 +285,8 @@ final class TranscriptionStore: ObservableObject {
     /// 4回目は諦めてエラーを表示する（恒常故障での無限ループ防止）。
     @MainActor private func failEngine(message: String) {
         endLiveSession()
+        // 古い待機 boot を無効化してから再接続する。
+        generation += 1
         if autoRestartCount < maxAutoRestart {
             autoRestartCount += 1
             state = .starting("whisper-stream が終了したため再接続中… (\(autoRestartCount)/\(maxAutoRestart))")

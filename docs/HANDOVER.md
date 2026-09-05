@@ -107,6 +107,12 @@ open ~/Library/Developer/Xcode/DerivedData/Okosu-*/Build/Products/Debug/Okosu.ap
    - セットアップ中のキャンセル：起動シーケンス中はフッターにキャンセル表示
    - 二重起動ガード：`~/Library/Application Support/Okosu/okosu.lock` の
      flock で検出し「既に起動しています」エラー（マイク競合の防止）
+8. ✅ **起動トリガと readiness 分離**（2026-09-06、v0.1.2）:
+   - 起動時自動開始を廃止。メニュー開きは見るだけ、ホットキー（⌘M）で開いた
+     ときのみ録音開始（`togglePopover(source:)` で分岐）
+   - `[Start speaking]` を readiness としてパース。モデルロード・ANE 完了前の
+     「受付中」誤表示を解消（準備中＝`準備中…`、完了＝受付中＋セッション開始）
+   - 起動シーケンス中のフッターはキャンセルのみ（開始の二重化なし）
 
 ## ハマりどころ（実績）
 

@@ -38,6 +38,9 @@ struct TranscriptBlock: Equatable, Identifiable {
 final class WhisperStreamParser {
     /// ブロック完成時のコールバック（Runner が購読する）。
     var onBlock: ((TranscriptBlock) -> Void)?
+    /// エンジン準備完了 (`[Start speaking]` 行) のコールバック。
+    /// モデルロード・ANE コンパイル完了後に1回出る。受付中表示の条件にする。
+    var onReady: (() -> Void)?
 
     private var pending = ""
     private var currentID: Int?
@@ -72,6 +75,11 @@ final class WhisperStreamParser {
 
     private func feedLine(_ rawLine: String) {
         let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if line == "[Start speaking]" {
+            onReady?()
+            return
+        }
 
         if let start = Self.parseStart(line) {
             // 前ブロックが END なしで残っていたら破棄して新規開始。

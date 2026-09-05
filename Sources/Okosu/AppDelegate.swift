@@ -20,7 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "Okosu")
-        item.button?.action = #selector(togglePopover(_:))
+        item.button?.action = #selector(statusButtonClicked(_:))
         item.button?.target = self
         self.statusItem = item
 
@@ -29,7 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentViewController = NSHostingController(rootView: ContentView().environmentObject(store))
 
         KeyboardShortcuts.onKeyUp(for: .togglePopover) { [weak self] in
-            self?.togglePopover(nil)
+            self?.togglePopover(nil, source: .hotkey)
         }
 
         // エンジン失敗は無言にしない: エラーになったらポップオーバーを開いて再試行導線を見せる。
@@ -48,7 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] _ in self?.openSettings() }
             .store(in: &cancellables)
 
-        store.start()
+        // 起動時の自動開始はしない。メニュー開きは見るだけ、ホットキーで始める。
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -86,13 +86,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    private enum PopoverSource {
+        case click
+        case hotkey
+    }
+
+    @objc private func statusButtonClicked(_ sender: Any?) {
+        togglePopover(sender, source: .click)
+    }
+
     @objc private func togglePopover(_ sender: Any?) {
+        togglePopover(sender, source: .click)
+    }
+
+    private func togglePopover(_ sender: Any?, source: PopoverSource) {
         guard let button = statusItem?.button else { return }
         if popover.isShown {
             popover.performClose(sender)
         } else {
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             NSApp.activate(ignoringOtherApps: true)
+            // ホットキーで開いたら録音も始める。メニュー開きは見るだけ。
+            // UI イベント由来＝メインスレッド前提 (popover 操作と同一)。
+            if source == .hotkey {
+                MainActor.assumeIsolated {
+                    store.start()
+                }
+            }
         }
     }
 }

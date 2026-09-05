@@ -12,6 +12,8 @@ final class WhisperStreamRunner {
     var onBlock: ((TranscriptBlock) -> Void)?
     var onANEDetected: ((Bool) -> Void)?
     var onTerminated: ((Int32, String) -> Void)?
+    /// 子の `[Start speaking]`（モデルロード完了）。起動成功の条件。
+    var onReady: (() -> Void)?
 
     private var process: Process?
     private let parser = WhisperStreamParser()
@@ -31,6 +33,7 @@ final class WhisperStreamRunner {
 
     init() {
         parser.onBlock = { [weak self] block in self?.onBlock?(block) }
+        parser.onReady = { [weak self] in self?.onReady?() }
     }
 
     /// バイナリ解決→起動まで行う。モデルパスは `ModelManager.ensureModel()` 済みを想定。
