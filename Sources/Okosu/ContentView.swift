@@ -115,7 +115,7 @@ struct ContentView: View {
     }
 }
 
-/// 1セッションのカード。右上に編集・コピー。
+/// 1セッションのカード。編集・コピー・削除は右下。
 private struct SessionCard: View {
     @EnvironmentObject private var store: TranscriptionStore
     var session: RecordingSession
@@ -123,7 +123,6 @@ private struct SessionCard: View {
     @State private var isEditing = false
     @State private var draft = ""
     @State private var copied = false
-    @State private var confirmingDelete = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -136,6 +135,20 @@ private struct SessionCard: View {
                         .font(.caption2)
                         .foregroundStyle(.red)
                 }
+                Spacer()
+            }
+            .font(.caption)
+            if isEditing {
+                TextEditor(text: $draft)
+                    .font(.body)
+                    .frame(minHeight: 80)
+                    .border(Color(nsColor: .separatorColor))
+            } else {
+                Text(session.text.trimmingCharacters(in: .whitespacesAndNewlines))
+                    .font(.body)
+                    .textSelection(.enabled)
+            }
+            HStack {
                 Spacer()
                 if isEditing {
                     Button("キャンセル") { isEditing = false }
@@ -156,34 +169,17 @@ private struct SessionCard: View {
                 }
                 .disabled(copied)
                 Button {
-                    confirmingDelete = true
+                    store.removeSession(id: session.id)
                 } label: {
                     Image(systemName: "trash")
                 }
                 .help("このカードを削除")
             }
-            .confirmationDialog("このカードを削除しますか？", isPresented: $confirmingDelete) {
-                Button("削除", role: .destructive) { store.removeSession(id: session.id) }
-                Button("キャンセル", role: .cancel) {}
-            }
             .font(.caption)
-            if isEditing {
-                TextEditor(text: $draft)
-                    .font(.body)
-                    .frame(minHeight: 80)
-                    .border(Color(nsColor: .separatorColor))
-            } else {
-                Text(session.text.trimmingCharacters(in: .whitespacesAndNewlines))
-                    .font(.body)
-                    .textSelection(.enabled)
-            }
         }
         .padding(8)
         .background(Color(nsColor: .textBackgroundColor))
         .cornerRadius(8)
-        .contextMenu {
-            Button("削除") { store.removeSession(id: session.id) }
-        }
     }
 
     private static let timeFormatter: DateFormatter = {

@@ -3,7 +3,8 @@ import Combine
 import SwiftUI
 
 extension KeyboardShortcuts.Name {
-    /// Toggle the transcription popover (default: Cmd+M, user-remappable).
+    /// Start/stop recording (default: Cmd+M, user-remappable).
+    /// Opens the popover when starting; on stop, copies the session and closes it.
     static let togglePopover = Self("togglePopover", default: .init(.m, modifiers: .command))
 }
 
@@ -101,18 +102,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func togglePopover(_ sender: Any?, source: PopoverSource) {
         guard let button = statusItem?.button else { return }
-        if popover.isShown {
+        // UI イベント由来＝メインスレッド前提 (popover 操作と同一)。
+        MainActor.assumeIsolated {
+            if source == .hotkey {
+                toggleRecording(sender, button: button)
+            } else if popover.isShown {
+                popover.performClose(sender)
+            } else {
+                popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        }
+    }
+
+    /// ホットキー操作：受付中なら停止＋コピー＋閉じる、停止中なら開く＋開始。
+    @MainActor private func toggleRecording(_ sender: Any?, button: NSStatusBarButton) {
+        if store.isListening {
+            store.finishLiveSessionAndCopy()
+            if popover.isShown {
+                popover.performClose(sender)
+            }
+        } else if popover.isShown {
             popover.performClose(sender)
         } else {
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             NSApp.activate(ignoringOtherApps: true)
-            // ホットキーで開いたら録音も始める。メニュー開きは見るだけ。
-            // UI イベント由来＝メインスレッド前提 (popover 操作と同一)。
-            if source == .hotkey {
-                MainActor.assumeIsolated {
-                    store.start()
-                }
-            }
+            store.start()
         }
     }
 }

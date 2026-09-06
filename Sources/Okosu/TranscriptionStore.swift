@@ -133,6 +133,18 @@ final class TranscriptionStore: ObservableObject {
         sessions.removeAll { $0.id == id }
     }
 
+    /// 受付中セッションを締めてその内容をコピーする（ホットキー終了用）。
+    /// 空セッションならコピーしない。
+    @MainActor func finishLiveSessionAndCopy() {
+        if let live = sessions.last, live.isLive {
+            let text = live.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty {
+                copy(string: text)
+            }
+        }
+        stop()
+    }
+
     @MainActor func copySession(id: UUID) {
         guard let session = sessions.first(where: { $0.id == id }) else { return }
         copy(string: session.text.trimmingCharacters(in: .whitespacesAndNewlines))

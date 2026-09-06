@@ -12,7 +12,7 @@ struct SettingsView: View {
         Form {
             Section("ホットキー") {
                 KeyboardShortcuts.Recorder(for: .togglePopover) {
-                    Text("ポップオーバーの表示")
+                    Text("録音の開始／終了")
                 }
                 Text("クリックして新しいキーを押す。Delete でクリア。")
                     .font(.caption)
