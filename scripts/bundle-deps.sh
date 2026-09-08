@@ -65,6 +65,23 @@ for ref in "${!SEEN[@]}"; do
   chmod +w "$FW/$base"
 done
 
+# 2b. sdl2-compat (libSDL2) は本体の libSDL3 を dlopen する（otool -L に現れない
+#     実行時依存）。同梱しないと /nix/store が無いマシンで dyld 初期化中に
+#     エラーダイアログ（子プロセスなので不可視）をモーダル表示したまま永久に
+#     ハングする。ビルド時に埋め込まれた store パスから実体を回収し、dlopen
+#     探索候補の @loader_path/libSDL3.dylib として Frameworks に置く。
+if [[ -f "$FW/libSDL2-2.0.0.dylib" && ! -f "$FW/libSDL3.dylib" ]]; then
+  sdl3_dir="$(strings - "$FW/libSDL2-2.0.0.dylib" | grep -m1 -E '^/nix/store/[^ ]+-sdl3-[^ ]+/lib$' || true)"
+  if [[ -z "$sdl3_dir" || ! -e "$sdl3_dir/libSDL3.dylib" ]]; then
+    echo "[bundle-deps] ERROR: sdl2-compat が dlopen する libSDL3 が見つかりません" >&2
+    exit 1
+  fi
+  # symlink を辿って実体としてコピーする（dlopen は libSDL3.dylib の名前で探す）。
+  cp -f "$sdl3_dir/libSDL3.dylib" "$FW/libSDL3.dylib"
+  chmod +w "$FW/libSDL3.dylib"
+  echo "[bundle-deps] dlopen 依存を同梱: libSDL3.dylib ($sdl3_dir)"
+fi
+
 # 3. @executable_path 相対に書き換える。
 #    プロセスの main executable は Resources/whisper-stream なので、
 #    @executable_path/../Frameworks が Frameworks を指す (全参照で統一)。
@@ -90,7 +107,7 @@ codesign --force --sign - --timestamp=none "$RES/whisper-stream"
 codesign --force --sign - --timestamp=none "$APP"
 
 echo "[bundle-deps] 同梱完了。残参照チェック:"
-leftovers="$(otool -L "$RES/whisper-stream" | grep '/nix/store' || true)"
+leftovers="$(otool -L "$RES/whisper-stream" "$FW"/*.dylib | grep '/nix/store' || true)"
 if [[ -n "$leftovers" ]]; then
   echo "$leftovers" >&2
   echo "[bundle-deps] ERROR: /nix/store 参照が残っています" >&2
