@@ -116,6 +116,13 @@ open ~/Library/Developer/Xcode/DerivedData/Okosu-*/Build/Products/Debug/Okosu.ap
      なしで即文字起こし可（OS 側キャッシュのため）。初回のみ約30秒かかる想定
 - 運用：開発版で検証が終わるまで Release を出さない（v0.1.2 は未検証のまま公開
   してしまった反省。Release が要るときは声掛け制）
+9. ✅ **別マシンでの不具合2件**（2026-09-08、PR #1 #2 で修正、v0.1.3）:
+   - モデル DL 完了直後の move 失敗：CFNetwork の一時ファイルは delegate return 後
+     に削除されるため、退避 move を delegate メソッド内で行うよう修正
+   - 配布先で準備中のまま永久ハング：sdl2-compat が libSDL3 を dlopen する実行時
+     依存（otool に出ない）。`Frameworks/libSDL3.dylib` として同梱＋残参照チェック
+     を全 dylib に拡大。不可視モーダルで固まるため Smoking test に `--help` 追加
+     済みだが、ビルドマシンでは store 実在のため検出不可な点に注意
    - 起動シーケンス中のフッターはキャンセルのみ（開始の二重化なし）
 
 ## ハマりどころ（実績）
