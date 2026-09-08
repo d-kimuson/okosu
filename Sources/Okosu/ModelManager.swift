@@ -55,26 +55,31 @@ enum ModelManager {
         let tmpURL = ggmlURL.appendingPathExtension("downloading")
         try? FileManager.default.removeItem(at: tmpURL)
 
-        let delegate = DownloadDelegate(progress: progress)
+        let delegate = DownloadDelegate(destination: tmpURL, progress: progress)
         let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
-        let tempFile = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             delegate.continuation = continuation
             session.downloadTask(with: ggmlDownloadURL).resume()
         }
-        try FileManager.default.moveItem(at: tempFile, to: tmpURL)
         try FileManager.default.moveItem(at: tmpURL, to: ggmlURL)
         progress(1.0)
     }
 
     /// 進捗付きダウンロード用の最小 delegate。完了は continuation で返す。
+    ///
+    /// CFNetwork の一時ファイルは `didFinishDownloadingTo` の return 後に削除されるため、
+    /// `destination` への退避は delegate メソッド内で行う（continuation で URL を返して
+    /// 呼び出し元で move すると、その時点で一時ファイルが消えていて失敗する）。
     private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
-        var continuation: CheckedContinuation<URL, Error>?
+        var continuation: CheckedContinuation<Void, Error>?
+        private let destination: URL
         private let progress: (Double) -> Void
         private var lastReported = -1.0
         private var finished = false
 
-        init(progress: @escaping (Double) -> Void) {
+        init(destination: URL, progress: @escaping (Double) -> Void) {
+            self.destination = destination
             self.progress = progress
         }
 
@@ -96,7 +101,12 @@ enum ModelManager {
         func urlSession(_: URLSession, downloadTask _: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
             guard !finished else { return }
             finished = true
-            continuation?.resume(returning: location)
+            do {
+                try FileManager.default.moveItem(at: location, to: destination)
+                continuation?.resume(returning: ())
+            } catch {
+                continuation?.resume(throwing: error)
+            }
             continuation = nil
         }
 
