@@ -19,7 +19,7 @@ struct ContentView: View {
 
     private var header: some View {
         HStack {
-            Image(systemName: store.isListening ? "mic.fill" : "mic.slash.fill")
+            Image(systemName: store.isListening ? "waveform.circle.fill" : "waveform")
                 .foregroundStyle(store.isListening ? .red : .secondary)
             Text("Okosu")
                 .font(.headline)
@@ -64,9 +64,14 @@ struct ContentView: View {
             }
         default:
             if store.sessions.isEmpty {
-                Text("開始ボタンを押してマイクに向かって話すと、ここに記録されます")
-                    .font(.body)
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("開始ボタンを押してマイクに向かって話すと、ここに記録されます")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                    Text("メニューバーの波形アイコンが Okosu です。マイク型は macOS の表示です")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {

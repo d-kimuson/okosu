@@ -20,7 +20,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        item.button?.image = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "Okosu")
+        // 波形アイコンにする。マイク型は macOS のマイクモード表示と紛らわしいため。
+        item.button?.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Okosu")
+        item.button?.toolTip = "Okosu（波形アイコン）。となりのマイク型は macOS のマイクモード表示です"
         item.button?.action = #selector(statusButtonClicked(_:))
         item.button?.target = self
         self.statusItem = item
@@ -38,6 +40,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .receive(on: RunLoop.main)
             .sink { [weak self] state in
                 guard let self else { return }
+                self.statusItem?.button?.image = NSImage(
+                    systemSymbolName: state == .listening ? "waveform.circle.fill" : "waveform",
+                    accessibilityDescription: "Okosu")
                 if case .error = state, !self.popover.isShown {
                     self.togglePopover(nil)
                 }
