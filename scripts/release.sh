@@ -11,7 +11,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-VERSION="${1:-v$(awk '/MARKETING_VERSION/ {gsub(/[";]/, ""); print $3}' project.yml)}"
+# project.yml の行形式 (`MARKETING_VERSION: "0.1.3"`) に依存しないよう数値部分を抜く。
+# $3 指定だと空になりタグ `v` の誤リリースを作る (2026-09-11 実績)。
+VERSION="${1:-v$(sed -n 's/.*MARKETING_VERSION[^0-9]*\([0-9][0-9.]*\).*/\1/p' project.yml)}"
 TAG="$VERSION"
 if [[ "$TAG" != v* ]]; then TAG="v$TAG"; fi
 
