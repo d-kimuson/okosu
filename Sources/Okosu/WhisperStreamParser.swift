@@ -1,10 +1,11 @@
 import Foundation
 
-/// whisper-stream VAD モード（`--step 0`）の標準出力をパースする。
+/// whisper-stream の標準出力をパースする（固定長窓／旧 VAD）。
 ///
 /// VAD モードでは発話区切りごとに以下のブロックが確定単位として出る
 /// （whisper.cpp examples/stream/stream.cpp の `use_vad` 経路）。
-/// 暫定表示の行上書きは非 VAD モードの話なので、ここでは扱わない。
+/// 固定長窓では `step == length, keep == 0` を前提に、ANSI 行消去付きの1行を
+/// 1回の認識結果として扱う。ローリング窓の暫定行には対応しない。
 ///
 /// ```
 /// ### Transcription 3 START | t0 = 12000 ms | t1 = 18500 ms
@@ -42,7 +43,29 @@ final class WhisperStreamParser {
     /// モデルロード・ANE コンパイル完了後に1回出る。受付中表示の条件にする。
     var onReady: (() -> Void)?
 
+    enum Mode {
+        case vad
+        case fixedWindow(milliseconds: Int)
+    }
+
+    private let mode: Mode
+    private var windowID = 0
+    private var pendingBytes = Data()
     private var pending = ""
+
+    init(mode: Mode = .vad) {
+        self.mode = mode
+    }
+
+    /// Pipe は UTF-8 の文字境界を保証しない。完全な行になってからデコードする。
+    func feed(_ data: Data) {
+        pendingBytes.append(data)
+        while let newline = pendingBytes.firstIndex(of: 10) {
+            let end = pendingBytes.index(after: newline)
+            feed(String(data: pendingBytes[..<end], encoding: .utf8) ?? "")
+            pendingBytes.removeSubrange(..<end)
+        }
+    }
     private var currentID: Int?
     private var currentT0 = 0
     private var currentT1 = 0
@@ -63,6 +86,10 @@ final class WhisperStreamParser {
 
     /// 残余バッファを強制フラッシュする（プロセス終了時に呼ぶ）。
     func flush() {
+        if !pendingBytes.isEmpty {
+            feed(String(data: pendingBytes, encoding: .utf8) ?? "")
+            pendingBytes.removeAll()
+        }
         if !pending.isEmpty {
             let rest = pending
             pending = ""
@@ -74,12 +101,25 @@ final class WhisperStreamParser {
     }
 
     private func feedLine(_ rawLine: String) {
+        if case let .fixedWindow(milliseconds) = mode, rawLine.hasPrefix("\u{1b}[2K\r") {
+            let text = rawLine.replacingOccurrences(of: "\u{1b}[2K\r", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            // 音声の実測時刻ではなく窓の論理時刻。重複判定には使用しない。
+            let block = TranscriptBlock(id: windowID, t0ms: windowID * milliseconds,
+                                        t1ms: (windowID + 1) * milliseconds,
+                                        segments: [TranscriptSegment(timestamp: nil, text: text)])
+            windowID += 1
+            onBlock?(block)
+            return
+        }
         let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if line == "[Start speaking]" {
             onReady?()
             return
         }
+
+        guard case .vad = mode else { return }
 
         if let start = Self.parseStart(line) {
             // 前ブロックが END なしで残っていたら破棄して新規開始。

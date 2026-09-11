@@ -1,133 +1,164 @@
 import Foundation
 
-/// whisper-stream 子プロセスの管理。
-///
-/// - 起動引数: `--step 0 -l ja`（VAD モード。HANDOVER 参照）＋ .env 既定の窓設定。
-/// - stdout を `WhisperStreamParser` に流し、確定ブロックを `onBlock` で通知する。
-/// - stderr の末尾を保持し、異常終了時の診断に使う。`Core ML model loaded` の
-///   検出で ANE 使用中かどうかを `onANEDetected` で通知する。
-/// - 常駐＋掴みっぱなし運用（HANDOVER のウォームアップ方針）: 起動直後の初回 ANE
-///   コンパイル約30秒はバックグラウンドで消化される。
+/// whisper-stream を5秒の非重複窓で実行する。
+/// 出力処理はプロセスごとの直列キュー、通知は main queue に順序を保って配送する。
 final class WhisperStreamRunner {
     var onBlock: ((TranscriptBlock) -> Void)?
     var onANEDetected: ((Bool) -> Void)?
     var onTerminated: ((Int32, String) -> Void)?
-    /// 子の `[Start speaking]`（モデルロード完了）。起動成功の条件。
     var onReady: (() -> Void)?
+    /// finish() による末尾推論・stdout 回収の完了。onBlock より後に通知する。
+    var onFinished: ((Int32, String) -> Void)?
 
     private var process: Process?
-    private let parser = WhisperStreamParser()
-    private var stderrTail: [String] = []
-    private let stderrTailLimit = 20
-    private var aneDetected = false
-    private var intentionalStop = false
+    private var activeID: UUID?
+    private var finishing = false
 
     var isRunning: Bool { process?.isRunning == true }
 
     struct Options {
         var language = "ja"
         var threads = 8
-        var lengthMs = 8000
-        var keepMs = 200
+        // step と length を別々に変更させない（ローリング窓への逆戻りを防ぐ）。
+        var windowMs = 5000
+
+        func arguments(modelPath: String) -> [String] {
+            ["-m", modelPath, "-l", language, "-t", String(threads),
+             "--step", String(windowMs), "--length", String(windowMs), "--keep", "0"]
+        }
     }
 
-    init() {
-        parser.onBlock = { [weak self] block in self?.onBlock?(block) }
-        parser.onReady = { [weak self] in self?.onReady?() }
+    private enum Event {
+        case block(TranscriptBlock)
+        case ready
+        case ane
+        case ended(Int32, String)
     }
 
-    /// バイナリ解決→起動まで行う。モデルパスは `ModelManager.ensureModel()` 済みを想定。
+    /// バイナリ解決・モデル配置は呼び出し元で完了させる。
     func start(binaryPath: String, modelPath: String, options: Options = Options()) throws {
         stop()
-        intentionalStop = false
-        aneDetected = false
-        stderrTail = []
-
+        precondition(options.windowMs > 0)
+        let identifier = UUID()
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binaryPath)
-        process.arguments = [
-            "-m", modelPath,
-            "-l", options.language,
-            "-t", String(options.threads),
-            "--step", "0",
-            "--length", String(options.lengthMs),
-            "--keep", String(options.keepMs)
-        ]
-
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.standardOutput = stdout
-        process.standardError = stderr
-
-        stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            guard let text = String(data: data, encoding: .utf8) else { return }
-            self?.parser.feed(text)
-        }
-        stderr.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            guard let text = String(data: data, encoding: .utf8) else { return }
-            self?.handleStderr(text)
-        }
-
-        process.terminationHandler = { [weak self] proc in
-            guard let self else { return }
-            stdout.fileHandleForReading.readabilityHandler = nil
-            stderr.fileHandleForReading.readabilityHandler = nil
-            self.parser.flush()
-            if !self.intentionalStop {
-                let tail = self.stderrTail.joined(separator: "\n")
-                self.onTerminated?(proc.terminationStatus, tail)
+        process.arguments = options.arguments(modelPath: modelPath)
+        let capture = Capture(windowMs: options.windowMs)
+        let emit: (Event) -> Void = { [weak self] event in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.activeID == identifier else { return }
+                self.receive(event)
             }
         }
-
+        capture.parser.onBlock = { emit(.block($0)) }
+        capture.parser.onReady = { emit(.ready) }
+        capture.onANE = { emit(.ane) }
+        process.standardOutput = capture.stdout
+        process.standardError = capture.stderr
+        capture.stdout.fileHandleForReading.readabilityHandler = { handle in
+            capture.queue.sync {
+                capture.parser.feed(handle.availableData)
+            }
+        }
+        capture.stderr.fileHandleForReading.readabilityHandler = { handle in
+            capture.queue.sync {
+                capture.readStderr(handle.availableData)
+            }
+        }
+        process.terminationHandler = { proc in
+            capture.stdout.fileHandleForReading.readabilityHandler = nil
+            capture.stderr.fileHandleForReading.readabilityHandler = nil
+            capture.queue.async {
+                // 終了通知と最後の readability callback の競合でも、末尾を捨てない。
+                capture.parser.feed(capture.stdout.fileHandleForReading.readDataToEndOfFile())
+                capture.parser.flush()
+                capture.readStderr(capture.stderr.fileHandleForReading.readDataToEndOfFile())
+                emit(.ended(proc.terminationStatus, capture.stderrTail))
+            }
+        }
+        activeID = identifier
+        finishing = false
+        self.process = process
         do {
             try process.run()
         } catch {
+            capture.stdout.fileHandleForReading.readabilityHandler = nil
+            capture.stderr.fileHandleForReading.readabilityHandler = nil
+            activeID = nil
+            self.process = nil
             throw WhisperError.launchFailed("whisper-stream の起動に失敗しました: \(error.localizedDescription)")
         }
-        self.process = process
     }
 
-    func stop() {
-        intentionalStop = true
-        parser.flush()
-        guard let process, process.isRunning else {
-            self.process = nil
-            return
-        }
-        process.terminate()
-        // 終了猶予 2 秒 → 応じなければ kill。
-        let deadline = Date().addingTimeInterval(2)
-        while process.isRunning, Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.05)
-        }
+    /// SDL の Ctrl+C 経路は待機中の短い音声も最後に推論する。UI を止めずに終了を待つ。
+    func finish() {
+        guard let process, !finishing else { return }
+        finishing = true
         if process.isRunning {
             process.interrupt()
-            if process.isRunning {
-                // 最終手段: SIGKILL（Process に直接 API がないため kill(2)）。
-                kill(process.processIdentifier, SIGKILL)
-            }
+            killAfterDeadline(process, seconds: 15)
         }
-        self.process = nil
     }
 
-    // MARK: - private
+    /// 起動キャンセル・アプリ終了用。末尾回収が必要な通常停止は finish() を使う。
+    func stop() {
+        activeID = nil
+        finishing = false
+        guard let process else { return }
+        self.process = nil
+        if process.isRunning {
+            process.terminate()
+            killAfterDeadline(process, seconds: 2)
+        }
+    }
 
-    private func handleStderr(_ text: String) {
-        for line in text.components(separatedBy: "\n") {
-            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { continue }
-            stderrTail.append(trimmed)
-            if stderrTail.count > stderrTailLimit {
-                stderrTail.removeFirst()
+    private func killAfterDeadline(_ process: Process, seconds: Double) {
+        DispatchQueue.global().asyncAfter(deadline: .now() + seconds) {
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+        }
+    }
+
+    private func receive(_ event: Event) {
+        switch event {
+        case let .block(block): onBlock?(block)
+        case .ready: onReady?()
+        case .ane: onANEDetected?(true)
+        case let .ended(code, tail):
+            process = nil
+            activeID = nil
+            if finishing {
+                finishing = false
+                onFinished?(code, tail)
+            } else {
+                onTerminated?(code, tail)
             }
-            if !aneDetected, trimmed.contains("Core ML model loaded") {
-                aneDetected = true
-                onANEDetected?(true)
-            }
+        }
+    }
+}
+
+/// 1プロセスの I/O 状態。再起動したエンジンとパーサ・診断ログを共有しない。
+private final class Capture {
+    let queue = DispatchQueue(label: "okosu.whisper-output")
+    let stdout = Pipe()
+    let stderr = Pipe()
+    let parser: WhisperStreamParser
+    var onANE: (() -> Void)?
+    private var detectedANE = false
+    private var stderrBytes = Data()
+    // バイト数で切った診断ログの先頭は UTF-8 の途中でもよい。置換して残りを読めるようにする。
+    // swiftlint:disable:next optional_data_string_conversion
+    var stderrTail: String { String(decoding: stderrBytes, as: UTF8.self) }
+
+    init(windowMs: Int) {
+        parser = WhisperStreamParser(mode: .fixedWindow(milliseconds: windowMs))
+    }
+
+    func readStderr(_ data: Data) {
+        stderrBytes.append(data)
+        if stderrBytes.count > 8192 { stderrBytes = Data(stderrBytes.suffix(8192)) }
+        if !detectedANE, stderrTail.contains("Core ML model loaded") {
+            detectedANE = true
+            onANE?()
         }
     }
 }

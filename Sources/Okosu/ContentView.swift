@@ -94,6 +94,9 @@ struct ContentView: View {
             if store.isListening {
                 Button("停止") { store.stop() }
                     .buttonStyle(.borderedProminent)
+            } else if store.isFinishing {
+                ProgressView().controlSize(.small)
+                Text("処理中…")
             } else if store.isBooting {
                 // セットアップ中も止められる (マイク許可待ち・モデル取得中の離脱用)。
                 Button("キャンセル") { store.stop() }
@@ -131,7 +134,7 @@ private struct SessionCard: View {
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                 if session.isLive {
-                    Text("受付中")
+                    Text(store.isFinishing ? "処理中" : "受付中")
                         .font(.caption2)
                         .foregroundStyle(.red)
                 }

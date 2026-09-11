@@ -9,14 +9,15 @@ import Foundation
 /// 1セッション＝開始→停止の区間。確定チャンクはその区間のセッションに追記され、
 /// チャンクごとに機械的な改行が入る（文境界の判定はしない）。
 ///
-/// UI に触れるメソッドは @MainActor。Runner コールバック（バックグラウンド）からは
-/// `Task { @MainActor in … }` で遷移させる。init は非隔離のままにして
+/// UI に触れるメソッドは @MainActor。Runner は main queue に順序を保って通知する。
+/// init は非隔離のままにして
 /// AppDelegate（非隔離）から生成できるようにする。
 final class TranscriptionStore: ObservableObject {
     enum EngineState: Equatable {
         case idle
         case starting(String)
         case listening
+        case finishing
         case error(String)
     }
 
@@ -29,12 +30,14 @@ final class TranscriptionStore: ObservableObject {
         switch state {
         case .idle: "停止中"
         case let .starting(message): message
-        case .listening: usesANE ? "受付中（ANE）" : "受付中"
+        case .listening: usesANE ? "受付中・5秒単位（ANE）" : "受付中・5秒単位"
+        case .finishing: "最後の音声を処理中…"
         case .error: "エラー"
         }
     }
 
     var isListening: Bool { state == .listening }
+    var isFinishing: Bool { state == .finishing }
     /// 起動シーケンス進行中（開始ボタンはこの間押せない）。
     var isBooting: Bool {
         if case .starting = state { return true }
@@ -52,28 +55,30 @@ final class TranscriptionStore: ObservableObject {
     private var instanceLockFD: Int32 = -1
     /// 子の `[Start speaking]` 待ち継続。stop() 時に resume して待機を解く。
     private var readyContinuation: CheckedContinuation<Void, Never>?
-    /// VAD 窓重なりによる二重確定の抑止。セッション開始時にリセットする。
-    private var duplicateGuard = DuplicateGuard()
+    private var copyOnFinish = false
 
     init() {
         runner.onBlock = { [weak self] block in
-            Task { @MainActor in self?.append(block) }
+            MainActor.assumeIsolated { self?.append(block) }
         }
         runner.onANEDetected = { [weak self] _ in
-            Task { @MainActor in self?.usesANE = true }
+            MainActor.assumeIsolated { self?.usesANE = true }
         }
         runner.onTerminated = { [weak self] code, tail in
-            Task { @MainActor in self?.handleUnexpectedTermination(code: code, tail: tail) }
+            MainActor.assumeIsolated { self?.handleUnexpectedTermination(code: code, tail: tail) }
         }
         runner.onReady = { [weak self] in
-            Task { @MainActor in self?.handleEngineReady() }
+            MainActor.assumeIsolated { self?.handleEngineReady() }
+        }
+        runner.onFinished = { [weak self] code, tail in
+            MainActor.assumeIsolated { self?.handleFinished(code: code, tail: tail) }
         }
     }
 
     /// 録音＋文字起こしを開始する。常駐＋掴みっぱなしで初回 ANE コンパイルを裏で消化する。
     /// 停止→開始の再入可。二重起動は無視する。
     @MainActor func start() {
-        guard !isListening, bootTask == nil else { return }
+        guard !isListening, !isFinishing, bootTask == nil else { return }
         autoRestartCount = 0
         launchBoot()
     }
@@ -99,8 +104,20 @@ final class TranscriptionStore: ObservableObject {
         start()
     }
 
-    /// 録音＋文字起こしを停止する。確定済みテキストは保持する。
+    /// 通常停止は最後の短い音声を回収してからセッションを締める。
     @MainActor func stop() {
+        guard !isFinishing else { return }
+        if isListening {
+            state = .finishing
+            runner.finish()
+            return
+        }
+        shutdown()
+    }
+
+    /// 起動キャンセル・アプリ終了用の即時停止。
+    @MainActor func shutdown() {
+        copyOnFinish = false
         generation += 1
         bootTask?.cancel()
         bootTask = nil
@@ -110,7 +127,7 @@ final class TranscriptionStore: ObservableObject {
         readyContinuation = nil
         runner.stop()
         endLiveSession()
-        if isListening || isBooting {
+        if isListening || isBooting || isFinishing {
             state = .idle
         }
     }
@@ -133,16 +150,22 @@ final class TranscriptionStore: ObservableObject {
         sessions.removeAll { $0.id == id }
     }
 
-    /// 受付中セッションを締めてその内容をコピーする（ホットキー終了用）。
-    /// 空セッションならコピーしない。
+    /// 末尾回収後にコピーする（ホットキー終了用）。
     @MainActor func finishLiveSessionAndCopy() {
-        if let live = sessions.last, live.isLive {
-            let text = live.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !text.isEmpty {
-                copy(string: text)
-            }
-        }
+        guard isListening else { return }
+        copyOnFinish = true
         stop()
+    }
+
+    @MainActor private func handleFinished(code: Int32, tail: String) {
+        guard isFinishing else { return }
+        if code == 0, copyOnFinish, let live = sessions.last, live.isLive {
+            let text = live.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty { copy(string: text) }
+        }
+        copyOnFinish = false
+        endLiveSession()
+        state = code == 0 ? .idle : .error("最後の音声の処理に失敗しました。確定済みの内容は保持しています。\n" + tail)
     }
 
     @MainActor func copySession(id: UUID) {
@@ -191,6 +214,7 @@ final class TranscriptionStore: ObservableObject {
             guard gen == generation, !Task.isCancelled else { return }
             usesANE = paths.hasEncoder
             try await startEngine(binary: binary, generation: gen)
+            guard gen == generation, !Task.isCancelled else { return }
             beginLiveSession()
             state = .listening
         } catch {
@@ -244,28 +268,23 @@ final class TranscriptionStore: ObservableObject {
     }
 
     @MainActor private func append(_ block: TranscriptBlock) {
-        // 受信回復＝健全とみなし、自動再接続カウンタをリセットする。
-        // 抑止ブロックもエンジン生存の証拠なので、判定前にリセットする。
+        guard isListening || isFinishing else { return }
         autoRestartCount = 0
-        // VAD 窓重なりの二重確定は抑止／差分化する。nil＝捨てる。
-        guard let text = duplicateGuard.process(block) else { return }
+        // 別々の音声窓なので文字列の重複排除はしない。意図的な反復も残す。
+        let text = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
         // 受付中のセッションがなければ作る（想定外の順序への耐性）。
         if sessions.last?.isLive != true {
             sessions.append(RecordingSession())
         }
         // 確定チャンクごとに機械的な改行を入れるだけ。文境界の判定はしない。
         let index = sessions.count - 1
-        if sessions[index].text.isEmpty {
-            sessions[index].text = text + "\n"
-        } else {
-            sessions[index].text += text + "\n"
-        }
+        sessions[index].text += text + "\n"
     }
 
     /// 受付中セッションを開始する（boot 完了時）。
     @MainActor private func beginLiveSession() {
         if sessions.last?.isLive == true { return }
-        duplicateGuard.reset()
         sessions.append(RecordingSession())
     }
 

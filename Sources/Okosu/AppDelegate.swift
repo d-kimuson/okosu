@@ -53,7 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        store.stop()
+        store.shutdown()
     }
 
     /// 設定ウィンドウを開く（前面になければ作る）。LSUIElement のため自前管理。
@@ -117,6 +117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// ホットキー操作：受付中なら停止＋コピー＋閉じる、停止中なら開く＋開始。
     @MainActor private func toggleRecording(_ sender: Any?, button: NSStatusBarButton) {
+        guard !store.isFinishing else { return }
         if store.isListening {
             store.finishLiveSessionAndCopy()
             if popover.isShown {
