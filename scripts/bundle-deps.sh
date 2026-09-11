@@ -71,7 +71,8 @@ done
 #     ハングする。ビルド時に埋め込まれた store パスから実体を回収し、dlopen
 #     探索候補の @loader_path/libSDL3.dylib として Frameworks に置く。
 if [[ -f "$FW/libSDL2-2.0.0.dylib" && ! -f "$FW/libSDL3.dylib" ]]; then
-  sdl3_dir="$(strings - "$FW/libSDL2-2.0.0.dylib" | grep -m1 -E '^/nix/store/[^ ]+-sdl3-[^ ]+/lib$' || true)"
+  # `strings -` は標準入力待ちになるため `-` を付けない (ファイル指定のみ)。
+  sdl3_dir="$(strings "$FW/libSDL2-2.0.0.dylib" | grep -m1 -E '^/nix/store/[^ ]+-sdl3-[^ ]+/lib$' || true)"
   if [[ -z "$sdl3_dir" || ! -e "$sdl3_dir/libSDL3.dylib" ]]; then
     echo "[bundle-deps] ERROR: sdl2-compat が dlopen する libSDL3 が見つかりません" >&2
     exit 1
