@@ -13,28 +13,13 @@ import Foundation
 /// init は非隔離のままにして
 /// AppDelegate（非隔離）から生成できるようにする。
 final class TranscriptionStore: ObservableObject {
-    enum EngineState: Equatable {
-        case idle
-        case starting(String)
-        case listening
-        case finishing
-        case error(String)
-    }
 
     @Published private(set) var sessions: [RecordingSession] = []
     @Published private(set) var state: EngineState = .idle
     @Published private(set) var downloadProgress: Double = 0
     @Published private(set) var usesANE = false
 
-    var statusText: String {
-        switch state {
-        case .idle: "停止中"
-        case let .starting(message): message
-        case .listening: usesANE ? "受付中・5秒単位（ANE）" : "受付中・5秒単位"
-        case .finishing: "最後の音声を処理中…"
-        case .error: "エラー"
-        }
-    }
+    var statusText: String { state.statusText(usesANE: usesANE) }
 
     var isListening: Bool { state == .listening }
     var isFinishing: Bool { state == .finishing }
@@ -56,6 +41,13 @@ final class TranscriptionStore: ObservableObject {
     /// 子の `[Start speaking]` 待ち継続。stop() 時に resume して待機を解く。
     private var readyContinuation: CheckedContinuation<Void, Never>?
     private var copyOnFinish = false
+    /// 自前のマイク音量監視。エンジンと同じ起点で計測し、無音窓の幻覚を捨てる。
+    private let micMonitor = MicLevelMonitor()
+    private let speechGate = WindowSpeechGate()
+    /// エンジンの音声窓の起点（子プロセス起動≒SDL キャプチャ開始の wall clock）。
+    private var audioStartTime: Date?
+    /// 無音判定で捨てた窓の数（デバッグ用。UI には出さない）。
+    private(set) var silencedWindowDrops = 0
 
     init() {
         runner.onBlock = { [weak self] block in
@@ -87,8 +79,7 @@ final class TranscriptionStore: ObservableObject {
     @MainActor private func launchBoot(delay: Duration = .zero) {
         // 取り残された待機があれば先に解く（古い待機は世代不一致で return する）。
         bootTask?.cancel()
-        readyContinuation?.resume(returning: ())
-        readyContinuation = nil
+        clearReadyContinuation()
         let gen = generation
         bootTask = Task {
             if delay > .zero {
@@ -109,6 +100,7 @@ final class TranscriptionStore: ObservableObject {
         guard !isFinishing else { return }
         if isListening {
             state = .finishing
+            micMonitor.stop()
             runner.finish()
             return
         }
@@ -123,60 +115,13 @@ final class TranscriptionStore: ObservableObject {
         bootTask = nil
         autoRestartCount = 0
         // readiness 待ちで止まっている boot があれば解く。
-        readyContinuation?.resume(returning: ())
-        readyContinuation = nil
+        clearReadyContinuation()
+        micMonitor.stop()
         runner.stop()
         endLiveSession()
         if isListening || isBooting || isFinishing {
             state = .idle
         }
-    }
-
-    @MainActor func clear() {
-        sessions = []
-    }
-
-    @MainActor func updateSession(id: UUID, text: String) {
-        guard let index = sessions.firstIndex(where: { $0.id == id }) else { return }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            sessions.remove(at: index)
-            return
-        }
-        sessions[index].text = trimmed
-    }
-
-    @MainActor func removeSession(id: UUID) {
-        sessions.removeAll { $0.id == id }
-    }
-
-    /// 末尾回収後にコピーする（ホットキー終了用）。
-    @MainActor func finishLiveSessionAndCopy() {
-        guard isListening else { return }
-        copyOnFinish = true
-        stop()
-    }
-
-    @MainActor private func handleFinished(code: Int32, tail: String) {
-        guard isFinishing else { return }
-        if code == 0, copyOnFinish, let live = sessions.last, live.isLive {
-            let text = live.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !text.isEmpty { copy(string: text) }
-        }
-        copyOnFinish = false
-        endLiveSession()
-        state = code == 0 ? .idle : .error("最後の音声の処理に失敗しました。確定済みの内容は保持しています。\n" + tail)
-    }
-
-    @MainActor func copySession(id: UUID) {
-        guard let session = sessions.first(where: { $0.id == id }) else { return }
-        copy(string: session.text.trimmingCharacters(in: .whitespacesAndNewlines))
-    }
-
-    private func copy(string: String) {
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(string, forType: .string)
     }
 
     // MARK: - private
@@ -233,7 +178,16 @@ final class TranscriptionStore: ObservableObject {
         state = .starting("エンジン起動中…（初回は ANE 準備に約30秒）")
         let options = WhisperStreamRunner.Options()
         let modelPath = ModelManager.ggmlURL.path
-        try runner.start(binaryPath: binary, modelPath: modelPath, options: options)
+        // 子の SDL キャプチャは起動直後に始まる。自前計測も同じ起点で始める。
+        audioStartTime = Date()
+        micMonitor.start()
+        do {
+            try runner.start(binaryPath: binary, modelPath: modelPath, options: options)
+        } catch {
+            micMonitor.stop()
+            audioStartTime = nil
+            throw error
+        }
         state = .starting("準備中…（モデルを読み込んでいます）")
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             readyContinuation = continuation
@@ -243,6 +197,11 @@ final class TranscriptionStore: ObservableObject {
         guard runner.isRunning else {
             throw WhisperError.terminatedUnexpectedly(-1, "whisper-stream が起動前に終了しました")
         }
+    }
+
+    private func clearReadyContinuation() {
+        readyContinuation?.resume(returning: ())
+        readyContinuation = nil
     }
 
     /// 子の readiness 通知。待機中のみ受領する。
@@ -273,6 +232,15 @@ final class TranscriptionStore: ObservableObject {
         // 別々の音声窓なので文字列の重複排除はしない。意図的な反復も残す。
         let text = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
+        // 窓全体が無音ならモデルの幻覚として捨てる。判定不能時は通す。
+        if let start = audioStartTime {
+            let keep = speechGate.keep(block: block, audioStart: start,
+                                       levelIn: micMonitor.maxRMS, hasData: micMonitor.hasData)
+            guard keep else {
+                silencedWindowDrops += 1
+                return
+            }
+        }
         // 受付中のセッションがなければ作る（想定外の順序への耐性）。
         if sessions.last?.isLive != true {
             sessions.append(RecordingSession())
@@ -283,20 +251,6 @@ final class TranscriptionStore: ObservableObject {
     }
 
     /// 受付中セッションを開始する（boot 完了時）。
-    @MainActor private func beginLiveSession() {
-        if sessions.last?.isLive == true { return }
-        sessions.append(RecordingSession())
-    }
-
-    /// 受付中セッションを締める（停止時・異常終了時）。空セッションは残さない。
-    @MainActor private func endLiveSession() {
-        guard let last = sessions.last, last.isLive else { return }
-        if last.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            sessions.removeLast()
-        } else {
-            sessions[sessions.count - 1].endedAt = Date()
-        }
-    }
 
     @MainActor private func handleUnexpectedTermination(code: Int32, tail: String) {
         // stop() 経由の意図的停止では呼ばれない（Runner が握りつぶす）。
@@ -324,6 +278,66 @@ final class TranscriptionStore: ObservableObject {
             AVCaptureDevice.requestAccess(for: .audio) { granted in
                 continuation.resume(returning: granted)
             }
+        }
+    }
+}
+
+/// セッション列の操作。型長制限のため class 本体から分離（同ファイルのため private のまま）。
+extension TranscriptionStore {
+    @MainActor func clear() {
+        sessions = []
+    }
+
+    @MainActor func updateSession(id: UUID, text: String) {
+        guard let index = sessions.firstIndex(where: { $0.id == id }) else { return }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            sessions.remove(at: index)
+            return
+        }
+        sessions[index].text = trimmed
+    }
+
+    @MainActor func removeSession(id: UUID) {
+        sessions.removeAll { $0.id == id }
+    }
+
+    /// 末尾回収後にコピーする（ホットキー終了用）。
+    @MainActor func finishLiveSessionAndCopy() {
+        guard isListening else { return }
+        copyOnFinish = true
+        stop()
+    }
+
+    @MainActor func copySession(id: UUID) {
+        guard let session = sessions.first(where: { $0.id == id }) else { return }
+        copyToPasteboard(session.text.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    @MainActor private func handleFinished(code: Int32, tail: String) {
+        guard isFinishing else { return }
+        if code == 0, copyOnFinish, let live = sessions.last, live.isLive {
+            let text = live.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty { copyToPasteboard(text) }
+        }
+        copyOnFinish = false
+        endLiveSession()
+        state = code == 0 ? .idle : .error("最後の音声の処理に失敗しました。確定済みの内容は保持しています。\n" + tail)
+    }
+
+    /// 受付中セッションを開始する（boot 完了時）。
+    @MainActor private func beginLiveSession() {
+        if sessions.last?.isLive == true { return }
+        sessions.append(RecordingSession())
+    }
+
+    /// 受付中セッションを締める（停止時・異常終了時）。空セッションは残さない。
+    @MainActor private func endLiveSession() {
+        guard let last = sessions.last, last.isLive else { return }
+        if last.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            sessions.removeLast()
+        } else {
+            sessions[sessions.count - 1].endedAt = Date()
         }
     }
 }

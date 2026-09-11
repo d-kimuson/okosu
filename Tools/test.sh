@@ -11,6 +11,8 @@ for test in parser dedup; do
   swiftc Sources/Okosu/WhisperStreamParser.swift Sources/Okosu/DuplicateGuard.swift "$work/main.swift" -o "$work/$test"
   "$work/$test"
 done
+swiftc Sources/Okosu/WindowSpeechGate.swift Sources/Okosu/WhisperStreamParser.swift Tools/gate-test.swift -o "$work/gate"
+"$work/gate"
 for test in window runner; do
   swiftc "${sources[@]}" "Tools/$test-test.swift" -o "$work/$test"
 done

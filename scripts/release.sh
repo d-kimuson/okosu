@@ -18,14 +18,14 @@ TAG="$VERSION"
 if [[ "$TAG" != v* ]]; then TAG="v$TAG"; fi
 
 if ! git diff --quiet || ! git diff --cached --quiet; then
-  echo "[release] 作業ツリーが dirty です。commit してから実行してください。" >&2
-  git status --short | head -10
-  exit 1
+ echo "[release] 作業ツリーが dirty です。commit してから実行してください。" >&2
+ git status --short | head -10
+ exit 1
 fi
 
 if gh release view "$TAG" >/dev/null 2>&1; then
-  echo "[release] $TAG は既存です。中止します。" >&2
-  exit 1
+ echo "[release] $TAG は既存です。中止します。" >&2
+ exit 1
 fi
 
 DIST="dist"
@@ -35,7 +35,7 @@ mkdir -p "$DIST"
 
 echo "[release] $TAG をビルドします (Release)…"
 env -u SDKROOT -u LD DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-  xcodebuild -scheme Okosu -configuration Release build
+ xcodebuild -scheme Okosu -configuration Release build
 
 APP_SRC="$(ls -dt ~/Library/Developer/Xcode/DerivedData/Okosu-*/Build/Products/Release/Okosu.app | head -1)"
 cp -R "$APP_SRC" "$DIST/Okosu.app"
@@ -47,7 +47,7 @@ ZIP="$DIST/Okosu-$TAG-macos-arm64.zip"
 echo "[release] ZIP 化します…"
 (cd "$DIST" && ditto -c -k --sequesterRsrc --keepParent Okosu.app "$(basename "$ZIP")")
 
-cat > "$DIST/notes-$TAG.md" <<EOF
+cat >"$DIST/notes-$TAG.md" <<EOF
 ## インストール
 
 1. ZIP を展開し、\`Okosu.app\` を \`/Applications\` に移動

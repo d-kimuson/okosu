@@ -27,6 +27,12 @@ PoC は `~/repos/poc-ja-transcribe`（以下 PoC リポジトリ）にあり、�
   `SDL_AUDIODRIVER=dummy` を指定すれば実マイクを開かず検証可能。
 - 実機で確認すること：日本語の窓境界の欠落、無音・雑音の誤認識、停止直後の
   最後の単語とコピー結果、連続発話時の遅延。表示は最大約5秒＋推論時間。
+- 無音窓スキップ（B案、2026-09-11〜）：`MicLevelMonitor`（AVAudioEngine の
+  input tap、whisper-stream とは別にマイクを開く）＋`WindowSpeechGate`。
+  子の SDL キャプチャは起動直後に始まるため、自前計測も `runner.start` 直前に
+  始めれば窓境界が一致する（±0.5秒の margin 付き）。`TranscriptionStore.append`
+  で窓内最大 RMS が閾値未満なら捨てる。`Tools/gate-test.swift` で判定のみ単体試験。
+  実機調整：小声が捨てられるなら閾値を下げる、無音幻覚が残るなら上げる。
 
 ## PoC で確定したこと（詳細は PoC リポジトリの README）
 
