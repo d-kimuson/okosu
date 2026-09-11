@@ -43,6 +43,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.statusItem?.button?.image = NSImage(
                     systemSymbolName: state == .listening ? "waveform.circle.fill" : "waveform",
                     accessibilityDescription: "Okosu")
+                // 受付中はポップオーバーを開きっぱなしにする。録音中は
+                // システムのマイクモード表示が隣に出てアイコン操作が紛らわしいため、
+                // 停止ボタンと文字起こしにアイコン経由なしで触れるようにする。
+                if state == .listening {
+                    self.popover.behavior = .applicationDefined
+                    if !self.popover.isShown, let button = self.statusItem?.button {
+                        self.popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+                    }
+                } else {
+                    self.popover.behavior = .transient
+                }
                 if case .error = state, !self.popover.isShown {
                     self.togglePopover(nil)
                 }

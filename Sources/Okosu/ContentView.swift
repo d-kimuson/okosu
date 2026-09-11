@@ -71,6 +71,9 @@ struct ContentView: View {
                     Text("メニューバーの波形アイコンが Okosu です。マイク型は macOS の表示です")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
+                    Text("⌘M でも開始／停止できます")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
                 }
             } else {
                 ScrollViewReader { proxy in
